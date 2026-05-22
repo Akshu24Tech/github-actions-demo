@@ -1,0 +1,20 @@
+name: GitHub Actions Demo
+
+# This triggers the workflow every time you push code to the main branch
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  say-hello:
+    # This defines the operating system the runner will use
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Check out your repository code onto the runner
+    - name: Check out repository code
+      uses: actions/checkout@v4
+
+    # Step 2: Run a simple echo command
+    - name: Run a one-line script
+      run: echo "Hello, world! Your first CI/CD automation works!"
