@@ -57,9 +57,6 @@ OUTPUT — 4-tab Excel: Income Statement | Balance Sheet | Cash Flow | Ratios & 
 ## Cell 0 — Install
 """
 
-!pip install pdfplumber rapidfuzz openpyxl google-genai groq rank-bm25 langgraph -q
-!pip install scikit-learn -q
-!apt-get install -y poppler-utils ghostscript -q 2>/dev/null
 print('Done')
 
 """## Cell 1 — Config
@@ -73,37 +70,35 @@ print('Done')
 **Adding new company type:** Add a new config file in `CONFIGS_DIR`, profiler picks it up automatically.
 """
 
-from google.colab import drive, userdata
+import os
 from pathlib import Path
 import json
 
-drive.mount('/content/drive')
-CACHE_DIR   = '/content/drive/MyDrive/P1_cache/'
-OUT_DIR     = '/content/drive/MyDrive/P1_outputs/'
-CONFIGS_DIR = '/content/drive/MyDrive/P1_configs/'   # NEW: profiler config registry
+CACHE_DIR   = os.environ.get('CACHE_DIR',   './cache/')
+OUT_DIR     = os.environ.get('OUT_DIR',     './outputs/')
+CONFIGS_DIR = os.environ.get('CONFIGS_DIR', './configs/')
 Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
 Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
 Path(CONFIGS_DIR).mkdir(parents=True, exist_ok=True)
 
-# -- Update paths after uploading files --
-EXCEL_PATH = '/content/Book2.xlsx'
-ENTITY     = 'standalone'  # or 'consolidated'
-PROVIDER   = 'groq'        # 'groq' | 'gemini' | 'ollama'
+# -- Update paths as needed --
+EXCEL_PATH = os.environ.get('EXCEL_PATH', './Book2.xlsx')
+ENTITY     = os.environ.get('ENTITY', 'standalone')  # or 'consolidated'
+PROVIDER   = os.environ.get('PROVIDER', 'groq')       # 'groq' | 'gemini' | 'ollama'
 
 # Multi-year registry: {pdf_path: fiscal_year}
 PDF_REGISTRY = {
-    #'/content/BMW-2025.pdf': 'FY2025',
-    # '/content/Adani_2024.pdf': 'FY2024',
-    # '/content/TCS_2024.pdf': 'FY2024',
-    # '/content/HDFC_Bank_2024.pdf': 'FY2024',
-    '/content/Airtel_2024-25.pdf': 'FY2024',
+    # './BMW-2025.pdf': 'FY2025',
+    # './Adani_2024.pdf': 'FY2024',
+    # './TCS_2024.pdf': 'FY2024',
+    # './HDFC_Bank_2024.pdf': 'FY2024',
+    './Airtel_2024-25.pdf': 'FY2024',
 }
 
-GEMINI_KEY, GROQ_KEY = '', ''
-try: GEMINI_KEY = userdata.get('GEMINI_API_KEY'); print('Gemini key loaded')
-except: pass
-try: GROQ_KEY = userdata.get('GROQ_API_KEY'); print('Groq key loaded')
-except: pass
+GEMINI_KEY = os.environ.get('GEMINI_API_KEY', '')
+GROQ_KEY   = os.environ.get('GROQ_API_KEY', '')
+if GEMINI_KEY: print('Gemini key loaded')
+if GROQ_KEY:   print('Groq key loaded')
 print(f'Provider: {PROVIDER} | PDFs: {len(PDF_REGISTRY)} | Entity: {ENTITY}')
 
 """## Cell 2 — Core Functions (run once)
@@ -1988,123 +1983,6 @@ Run Cell 3 (tests) before this.
 
 """
 
-t0 = time.time()
-
-# ── Layer 1: Ingest ───────────────────────────────────────────────────
-print('Layer 1: Ingesting PDFs (layout + tables)...')
-all_tc = ingest_all(PDF_REGISTRY)
-
-# ── Layer 2: Build Indexes ────────────────────────────────────────────
-print('Layer 2: Building Page Index + BM25...')
-page_indexes = {}
-bm25_indexes = {}
-for fy, tc_data in all_tc.items():
-    tc = tc_data['tc']; h = tc_data['hash']
-    page_indexes[fy] = build_page_index(h, tc, pdf_path=tc_data['path'])
-    bm25, bp = build_bm25(tc)
-    bm25_indexes[fy] = (bm25, bp)
-    print(f'  {fy}: {len(page_indexes[fy])} blocks in Page Index, BM25 over {len(tc)} pages')
-
-# ── Schema Mapper (if Excel template exists) ──────────────────────────
-primary_fy    = list(all_tc.keys())[0]
-primary_tc    = all_tc[primary_fy]['tc']
-primary_hash  = all_tc[primary_fy]['hash']
-primary_idx   = page_indexes[primary_fy]
-schema = {}
-if Path(EXCEL_PATH).exists():
-    print('Schema Mapper: reading Excel template...')
-    schema = schema_mapper(EXCEL_PATH, primary_tc, primary_hash, idx=primary_idx)
-    print(f'  Field map: {len(schema.get("field_map", {}))} entries')
-
-# ── Layer 3: LangGraph Dual-Agent Extraction ──────────────────────────
-print('Layer 3: Running LangGraph dual-agent...')
-graph = build_graph()
-init_state = AgentState(
-    all_tc=all_tc, page_indexes=page_indexes, bm25_indexes=bm25_indexes,
-    schema=schema, profiles={},
-    facts={}, validation={}, failed_fields=[],
-    retry_count=0, top_k=3, log=[]
-)
-final_state = graph.invoke(init_state)
-facts = final_state['facts']
-
-# Count what was extracted before ratios
-extracted_count = sum(1 for v in facts.values()
-                      if isinstance(v, dict) and v.get('value') is not None)
-print(f'  Extracted: {extracted_count} raw metrics')
-
-# ── Layer 4: Ratio Computation Engine (NEW) ───────────────────────────
-# The derive function is now called inside node_extract of LangGraph
-print('Layer 4: Ratio computation is handled within the LangGraph pipeline.')
-
-# ── Summary ───────────────────────────────────────────────────────────
-total = sum(1 for v in facts.values() if isinstance(v, dict) and v.get('value') is not None)
-derived = sum(1 for v in facts.values() if isinstance(v, dict) and v.get('flag') == 'DERIVED')
-print(f'\n✓ Done in {time.time()-t0:.1f}s')
-print(f'  Raw extracted : {extracted_count}')
-print(f'  Derived ratios: {derived}')
-print(f'  Total metrics : {total}')
-print(f'  Validation    : {final_state["validation"]}')
-print(f'  Retries       : {final_state["retry_count"]}')
-
-# Print extracted values by year
-from collections import defaultdict
-by_yr = defaultdict(dict)
-for key, f in facts.items():
-    if isinstance(f, dict) and f.get('value') is not None:
-        by_yr[f.get('year', '?')][f.get('metric', key.split('__')[0])] = f
-
-for yr in sorted(by_yr, key=str):
-    print(f'\n  ── {yr} ({len(by_yr[yr])} metrics) ──')
-    for m, f in sorted(by_yr[yr].items()):
-        v = f['value']
-        c = f.get('confidence', 0)
-        flag = f.get('flag', '')
-        vstr = f'{v:,.2f}' if isinstance(v, float) else f'{v:,}' if isinstance(v, int) else str(v)
-        flag_icon = '🟢' if c >= 0.85 else ('🟡' if c >= 0.60 else ('📐' if flag == 'DERIVED' else '🔴'))
-        print(f'    {flag_icon} {m:<42} {vstr:>14}  conf={c:.2f}')
-
-"""## Cell 5 — Write Raw Dump Excel
-
-Generates a clean structured Excel **from the facts dict directly** — no template, no label matching.
-Shows every extracted metric exactly as-is so you can see:
-- How many metrics were found
-- Which year each value belongs to
-- Which page it came from
-- Confidence level (color coded)
-- What's still missing (listed at bottom of each tab)
-
-**Format:**
-```
-Tab 1: Income Statement
-Tab 2: Balance Sheet
-Tab 3: Cash Flow
-Tab 4: Ratios & KPIs  (derived metrics, formula shown)
-Tab 5: Summary        (coverage stats, what's missing)
-```
-
-"""
-
-# ====================================================================
-# CELL 5 — RAW DUMP EXCEL
-# Writes everything in facts dict into a clean structured workbook.
-# No template needed. No label matching. No N/A from wrong columns.
-# Just: facts → organised tabs → download.
-# ====================================================================
-
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from collections import defaultdict
-
-# ── Determine years present in facts ─────────────────────────────────
-years = sorted(set(
-    str(v.get('year')) for v in facts.values()
-    if isinstance(v, dict) and v.get('year') and v.get('year') != '?'
-))
-if not years:
-    years = ['FY2024']
-print(f'Years in facts: {years}')
 
 # ── Colors ────────────────────────────────────────────────────────────
 NAVY   = 'FF1F3864'
@@ -2185,544 +2063,637 @@ TABS = {
     ],
 }
 
-# ── Build workbook ────────────────────────────────────────────────────
-wb = Workbook()
-first = True
-tab_stats = {}   # {tab_name: {found, total}}
-
-for tab_name, sections in TABS.items():
-    ws = wb.active if first else wb.create_sheet(tab_name)
-    if first: ws.title = tab_name; first = False
-
-    # ── Column widths ──
-    ws.column_dimensions['A'].width = 34   # metric label
-    ws.column_dimensions['B'].width = 8    # unit hint
-    for i in range(len(years)):
-        ws.column_dimensions[get_column_letter(i + 3)].width = 15
-    ws.column_dimensions[get_column_letter(len(years) + 3)].width = 12  # page(s)
-    ws.column_dimensions[get_column_letter(len(years) + 4)].width = 10  # conf
-    ws.column_dimensions[get_column_letter(len(years) + 5)].width = 10  # flag
-    if tab_name == 'Ratios & KPIs':
-        ws.column_dimensions[get_column_letter(len(years) + 6)].width = 38  # formula
-
-    # ── Header row ──
-    hdr(ws.cell(1, 1), 'Metric')
-    hdr(ws.cell(1, 2), 'Unit')
-    for i, yr in enumerate(years):
-        hdr(ws.cell(1, i + 3), yr)
-    hdr(ws.cell(1, len(years) + 3), 'Source Page(s)')
-    hdr(ws.cell(1, len(years) + 4), 'Conf')
-    hdr(ws.cell(1, len(years) + 5), 'Flag')
-    if tab_name == 'Ratios & KPIs':
-        hdr(ws.cell(1, len(years) + 6), 'Formula')
-    ws.row_dimensions[1].height = 22
-
-    row_idx = 2
-    tab_found = 0
-    tab_total = 0
-
-    for section_name, metric_keys in sections:
-        # Section subheader row
-        sec_cell = ws.cell(row_idx, 1, section_name.upper())
-        sec_cell.font = Font(bold=True, size=9, color='333333')
-        sec_cell.fill = PatternFill('solid', fgColor=LGREY)
-        sec_cell.alignment = Alignment(vertical='center')
-        for col in range(2, len(years) + 7):
-            ws.cell(row_idx, col).fill = PatternFill('solid', fgColor=LGREY)
-        ws.row_dimensions[row_idx].height = 16
-        row_idx += 1
-
-        for mk in metric_keys:
-            tab_total += 1
-            # Gather facts for this metric across all years
-            year_facts = {}
-            for yr in years:
-                # Try exact key first, then fuzzy year match
-                f = facts.get(f'{mk}__{yr}')
-                if f is None:
-                    # Try digit match
-                    yr_digits = yr.replace('FY','').replace('Year','')
-                    for key, fct in facts.items():
-                        if (isinstance(fct, dict) and fct.get('metric') == mk
-                                and yr_digits in str(fct.get('year',''))):
-                            f = fct; break
-                if f is None:
-                    f = facts.get(f'{mk}__?')
-                year_facts[yr] = f
-
-            # Determine row-level confidence/flag (worst across years)
-            all_confs = [f.get('confidence', 0) for f in year_facts.values() if f and f.get('value') is not None]
-            all_flags = [f.get('flag','') for f in year_facts.values() if f]
-            best_conf = max(all_confs) if all_confs else None
-            any_derived = any(fl == 'DERIVED' for fl in all_flags)
-            has_value = any(f and f.get('value') is not None for f in year_facts.values())
-
-            if has_value:
-                tab_found += 1
-
-            # Label cell
-            label = mk.replace('_', ' ').title()
-            if mk.endswith('_pct'): label = label.replace(' Pct', ' %')
-            label_cell = ws.cell(row_idx, 1, label)
-            label_cell.font = Font(size=10)
-            label_cell.alignment = Alignment(vertical='center', indent=1)
-
-            # Unit cell (detect from any found fact)
-            unit_val = ''
-            for f in year_facts.values():
-                if f and f.get('unit'):
-                    unit_val = str(f['unit']); break
-            ws.cell(row_idx, 2, unit_val).font = Font(size=9, color='666666', italic=True)
-
-            # Value cells
-            pages_all = set()
-            for i, yr in enumerate(years):
-                f = year_facts.get(yr)
-                val_cell = ws.cell(row_idx, i + 3)
-                if f is None or f.get('value') is None:
-                    val_cell.value = '—'
-                    val_cell.font = Font(color='AAAAAA', size=10)
-                    val_cell.alignment = Alignment(horizontal='right')
-                else:
-                    v = f['value']
-                    val_cell.value = round(v, 4) if isinstance(v, float) else v
-                    conf = f.get('confidence', 0)
-                    flag = f.get('flag', '')
-                    val_cell.fill = conf_fill(conf, flag)
-                    val_cell.font = conf_font(conf, flag)
-                    val_cell.alignment = Alignment(horizontal='right', vertical='center')
-                    if isinstance(v, (int, float)) and not mk.endswith('_pct') and not mk in ('current_ratio','quick_ratio','debt_to_equity','debt_to_ebitda','interest_coverage','asset_turnover','cfo_to_pat'):
-                        val_cell.number_format = '#,##0'
-                    elif mk.endswith('_pct'):
-                        val_cell.number_format = '0.00'
-                    # Collect source pages
-                    pg = f.get('exact_page') or f.get('page')
-                    if pg: pages_all.add(str(pg))
-
-            # Source pages
-            ws.cell(row_idx, len(years) + 3, ', '.join(sorted(pages_all)) or '—').font = Font(size=9, color='444444', italic=True)
-
-            # Confidence (show worst/best)
-            conf_display = f'{best_conf:.2f}' if best_conf is not None else '—'
-            ws.cell(row_idx, len(years) + 4, conf_display).font = Font(
-                size=9,
-                color='006100' if (best_conf or 0) >= 0.85 else
-                      '7F6000' if (best_conf or 0) >= 0.60 else
-                      '9C0006' if best_conf else '888888'
-            )
-
-            # Flag
-            flag_display = 'DERIVED' if any_derived else (all_flags[0] if all_flags else '—')
-            ws.cell(row_idx, len(years) + 5, flag_display).font = Font(size=9, italic=True, color='555555')
-
-            # Formula (Ratios tab only)
-            if tab_name == 'Ratios & KPIs':
-                formula = ''
-                for f in year_facts.values():
-                    if f and f.get('formula'): formula = f['formula']; break
-                ws.cell(row_idx, len(years) + 6, formula).font = Font(size=9, italic=True, color='555555')
-
-            row_idx += 1
-
-    tab_stats[tab_name] = {'found': tab_found, 'total': tab_total}
-
-    # Freeze top row
-    ws.freeze_panes = 'C2'
-
-# ── Tab 5: Summary ────────────────────────────────────────────────────
-ws_sum = wb.create_sheet('Summary')
-ws_sum.column_dimensions['A'].width = 35
-ws_sum.column_dimensions['B'].width = 18
-ws_sum.column_dimensions['C'].width = 18
-
-hdr(ws_sum.cell(1, 1), 'Extraction Summary Report')
-hdr(ws_sum.cell(1, 2), 'Found')
-hdr(ws_sum.cell(1, 3), 'Coverage')
-
-r = 2
-ws_sum.cell(r, 1, 'PDF(s) processed').font = Font(bold=True, size=10)
-ws_sum.cell(r, 2, str(len(PDF_REGISTRY))); r += 1
-ws_sum.cell(r, 1, 'Years extracted').font = Font(bold=True, size=10)
-ws_sum.cell(r, 2, ', '.join(years)); r += 1
-ws_sum.cell(r, 1, 'Provider').font = Font(bold=True, size=10)
-ws_sum.cell(r, 2, PROVIDER); r += 1
-r += 1
-
-# Per-tab stats
-ws_sum.cell(r, 1, 'TAB COVERAGE').font = Font(bold=True, size=11)
-r += 1
-total_found = total_metrics = 0
-for tab, stat in tab_stats.items():
-    pct = stat['found'] / stat['total'] * 100 if stat['total'] else 0
-    ws_sum.cell(r, 1, tab).font = Font(size=10)
-    ws_sum.cell(r, 2, f"{stat['found']} / {stat['total']}")
-    ws_sum.cell(r, 3, f'{pct:.0f}%').font = Font(
-        color='006100' if pct >= 80 else '7F6000' if pct >= 50 else '9C0006',
-        bold=True, size=10
-    )
-    total_found += stat['found']; total_metrics += stat['total']
-    r += 1
-
-r += 1
-ws_sum.cell(r, 1, 'TOTAL').font = Font(bold=True, size=11)
-ws_sum.cell(r, 2, f'{total_found} / {total_metrics}').font = Font(bold=True)
-overall_pct = total_found / total_metrics * 100 if total_metrics else 0
-ws_sum.cell(r, 3, f'{overall_pct:.0f}%').font = Font(bold=True, size=11,
-    color='006100' if overall_pct >= 80 else '7F6000' if overall_pct >= 50 else '9C0006')
-r += 2
-
-# Confidence breakdown
-ws_sum.cell(r, 1, 'CONFIDENCE BREAKDOWN').font = Font(bold=True, size=11)
-r += 1
-bands = [
-    ('🟢 High confidence (≥0.85)', lambda f: (f.get('confidence') or 0) >= 0.85 and f.get('flag') != 'DERIVED'),
-    ('🟡 Medium confidence (0.60-0.84)', lambda f: 0.60 <= (f.get('confidence') or 0) < 0.85),
-    ('🔴 Low confidence (<0.60)', lambda f: 0 < (f.get('confidence') or 0) < 0.60 and f.get('flag') != 'DERIVED'),
-    ('📐 Derived / Computed', lambda f: f.get('flag') == 'DERIVED'),
-    ('❌ Page corrected (cited≠actual)', lambda f: f.get('page_corrected')),
-]
-for label, fn in bands:
-    count = sum(1 for v in facts.values() if isinstance(v, dict) and v.get('value') is not None and fn(v))
-    ws_sum.cell(r, 1, label).font = Font(size=10)
-    ws_sum.cell(r, 2, count); r += 1
-r += 1
-
-# Missing metrics list
-ws_sum.cell(r, 1, 'MISSING METRICS (not found in any PDF)').font = Font(bold=True, size=11)
-r += 1
-all_target_metrics = [mk for sections in TABS.values() for _, mks in sections for mk in mks]
-missing = []
-for mk in all_target_metrics:
-    has_val = any(
-        isinstance(facts.get(f'{mk}__{yr}'), dict) and facts[f'{mk}__{yr}'].get('value') is not None
-        for yr in years
-    ) or (isinstance(facts.get(f'{mk}__?'), dict) and facts[f'{mk}__?'].get('value') is not None)
-    if not has_val:
-        missing.append(mk)
-
-for mk in missing:
-    ws_sum.cell(r, 1, f'  • {mk.replace("_"," ").title()}').font = Font(size=10, color='9C0006')
-    r += 1
-
-# Color legend
-r += 1
-ws_sum.cell(r, 1, 'COLOR LEGEND').font = Font(bold=True, size=11); r += 1
-for color, meaning in [
-    (GREEN,   'High confidence — both agents agreed (≥0.85)'),
-    (YELLOW,  'Medium confidence — one agent or fuzzy match (0.60-0.84)'),
-    (RED,     'Low confidence or unverified (<0.60)'),
-    (DERIVED, 'Derived/Computed — calculated from other metrics'),
-]:
-    cell = ws_sum.cell(r, 1, '  ')
-    cell.fill = PatternFill('solid', fgColor=color)
-    ws_sum.cell(r, 2, meaning).font = Font(size=10)
-    r += 1
-
-# ── Save ──────────────────────────────────────────────────────────────
-out_name = f'Financial_Metrics_{"_".join(years)}.xlsx'
-out_path = f'{OUT_DIR}{out_name}'
-wb.save(out_path)
-
-# ── Print summary ─────────────────────────────────────────────────────
-print(f'\n✅ Excel saved → {out_path}')
-print(f'   File: {out_name}')
-print()
-print('COVERAGE REPORT')
-print('─' * 40)
-for tab, stat in tab_stats.items():
-    pct = stat['found'] / stat['total'] * 100 if stat['total'] else 0
-    bar = '█' * int(pct / 10) + '░' * (10 - int(pct / 10))
-    print(f'  {tab:<22} {bar}  {stat["found"]:2}/{stat["total"]} ({pct:.0f}%)')
-print(f'  {"TOTAL":<22} {total_found:2}/{total_metrics} ({overall_pct:.0f}%)')
-print()
-
-if missing:
-    print(f'MISSING ({len(missing)} metrics not extracted):')
-    for mk in missing:
-        print(f'  • {mk}')
-else:
-    print('All target metrics extracted! 🎉')
-
-print()
-print('CONFIDENCE BREAKDOWN:')
-g = sum(1 for v in facts.values() if isinstance(v,dict) and (v.get('confidence') or 0)>=0.85 and v.get('flag')!='DERIVED')
-y = sum(1 for v in facts.values() if isinstance(v,dict) and 0.60<=(v.get('confidence') or 0)<0.85)
-red_c = sum(1 for v in facts.values() if isinstance(v,dict) and 0<(v.get('confidence') or 0)<0.60 and v.get('flag')!='DERIVED')
-d = sum(1 for v in facts.values() if isinstance(v,dict) and v.get('flag')=='DERIVED')
-print(f'  🟢 High  : {g}')
-print(f'  🟡 Medium: {y}')
-print(f'  🔴 Low   : {red_c}')
-print(f'  📐 Derived: {d}')
-
-"""## Cell 6 — Fill Existing Excel Template (Optional)
-
-**Run only if you have a specific Excel template** (e.g. `Book2.xlsx`) that needs populating.
-Cell 5 already wrote the full raw dump. This cell additionally fills your template.
-
-**How it works:**
-- Scans every row of every sheet in your template
-- Finds the label cell (whichever column it's in — A, B, E, anywhere)
-- Normalizes the label → looks up in `facts` dict
-- Fills empty cells to the right of the label with matched values
-- Color codes by confidence (🟢 green / 🟡 yellow / 🔴 red)
-- Adds an `Extraction_Log` sheet with full audit trail
-
-**Set `EXCEL_PATH` in Cell 1 before running.**
-
-"""
-
-# ====================================================================
-# CELL 6 — FILL EXISTING EXCEL TEMPLATE (OPTIONAL)
-# Populates your own Excel template (Book2.xlsx or any other).
-# Finds labels wherever they are — no hardcoded column assumptions.
-# ====================================================================
-
-from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from openpyxl.comments import Comment
-from collections import defaultdict
-import re
-
-# ── Check template exists ─────────────────────────────────────────────
-if not Path(EXCEL_PATH).exists():
-    print(f'⚠️  Template not found: {EXCEL_PATH}')
-    print('   Set EXCEL_PATH in Cell 1 and re-run.')
-else:
-    wb_tmpl = load_workbook(EXCEL_PATH)
-
-    # ── Styles ───────────────────────────────────────────────────────
-    FILL_GREEN  = PatternFill('solid', fgColor='E2EFDA')
-    FILL_YELLOW = PatternFill('solid', fgColor='FFEB9C')
-    FILL_RED    = PatternFill('solid', fgColor='FFC7CE')
-    FILL_DERIVED= PatternFill('solid', fgColor='D9EAD3')
-
-    def _tmpl_fill(conf, flag):
-        if flag == 'DERIVED': return FILL_DERIVED
-        if (conf or 0) >= 0.85: return FILL_GREEN
-        if (conf or 0) >= 0.60: return FILL_YELLOW
-        return FILL_RED
-
-    def _tmpl_font(conf, flag):
-        if flag == 'DERIVED': return Font(color='1E6B2E', italic=True)
-        if (conf or 0) >= 0.85: return Font(color='0D3B0D')
-        if (conf or 0) >= 0.60: return Font(color='7F6000', italic=True)
-        return Font(color='9C0006', italic=True)
-
-    # ── Find label cell in a row (any column) ────────────────────────
-    def _label_cell(ws, row):
-        """Scan all cells in row — return (cell, text) for first non-empty."""
-        for cell in row:
-            v = cell.value
-            # Handle merged cells
-            if v is None:
-                for mr in ws.merged_cells.ranges:
-                    if cell.coordinate in mr:
-                        top = ws.cell(mr.min_row, mr.min_col)
-                        if top.value: v = top.value; break
-            if v and str(v).strip() and len(str(v).strip()) > 1:
-                return cell, str(v).strip()
-        return None, ''
-
-    # ── Detect year from column header ───────────────────────────────
-    def _col_year(ws, col):
-        """Look up column headers (up to 5 rows above) for a year hint."""
-        for offset in range(1, 6):
-            row_idx = max(1, ws.min_row + offset - 1)
-            # Scan up to row 6 for header
-            pass
-        for r in range(1, min(ws.max_row, 6)):
-            cell_val = ws.cell(r, col).value
-            if not cell_val: continue
-            s = str(cell_val)
-            # FY2024, 2024, Year 1, Year1 etc.
-            for pat, fmt in [
-                (r'FY\s*(\d{4})', lambda m: f'FY{m.group(1)}'),
-                (r'(\d{4})-\d+',  lambda m: f'FY{m.group(1)}'),
-                (r'Year\s*(\d)',   lambda m: f'Year{m.group(1)}'),
-                (r'(20\d{2})', lambda m: f'FY{m.group(1)}'),
-            ]:
-                m = re.search(pat, s, re.IGNORECASE)
-                if m: return fmt(m)
-        return f'FY{years[0].replace("FY","") if years else "2024"}'
-
-    # ── Fact lookup with flexible year matching ───────────────────────
-    def _look_up(mk, yr_handle):
-        """Find fact for metric+year, trying multiple year formats."""
-        # 1. Exact
-        f = facts.get(f'{mk}__{yr_handle}')
-        if f and f.get('value') is not None: return f
-        # 2. Digit match: FY2024 ↔ 2024 ↔ Year1
-        yr_digits = re.sub(r'[^0-9]', '', str(yr_handle))
-        for key, fact in facts.items():
-            if not isinstance(fact, dict): continue
-            if fact.get('metric') != mk: continue
-            if fact.get('value') is None: continue
-            fact_digits = re.sub(r'[^0-9]', '', str(fact.get('year', '')))
-            if yr_digits and fact_digits and yr_digits in fact_digits:
-                return fact
-        # 3. year=? fallback
-        f2 = facts.get(f'{mk}__?')
-        if f2 and f2.get('value') is not None: return f2
-        # 4. Any year for this metric (last resort, pick most recent)
-        cands = sorted(
-            [f for f in facts.values() if isinstance(f, dict)
-             and f.get('metric') == mk and f.get('value') is not None],
-            key=lambda x: str(x.get('year', '')), reverse=True
-        )
-        return cands[0] if cands else None
-
-    # ── Main fill loop ────────────────────────────────────────────────
-    log_rows = []
-    stats = defaultdict(int)
-
-    for sheet_name in wb_tmpl.sheetnames:
-        ws = wb_tmpl[sheet_name]
-        if sheet_name == 'Extraction_Log': continue  # skip log sheet
-
-        for row in ws.iter_rows():
-            lbl_cell, lbl_text = _label_cell(ws, row)
-            if not lbl_cell or not lbl_text: continue
-
-            mk = normalize(lbl_text)  # uses canonical map
-            if not mk: continue
-
-            # Find empty cells to the right of the label
-            target_cells = [c for c in row
-                            if c.column > lbl_cell.column
-                            and c.value is None]
-            if not target_cells: continue
-
-            for cell in target_cells:
-                yr_handle = _col_year(ws, cell.column)
-                fact = _look_up(mk, yr_handle)
-
-                conf = fact.get('confidence', 0) if fact else 0
-                val  = fact.get('value') if fact else None
-                flag = fact.get('flag', '') if fact else ''
-                pg   = (fact.get('exact_page') or fact.get('page') or '?') if fact else '?'
-
-                log_rows.append({
-                    'sheet': sheet_name, 'field': lbl_text, 'canonical': mk,
-                    'year': yr_handle, 'value': val, 'confidence': conf,
-                    'flag': flag, 'page': pg,
-                    'status': 'FILLED' if val is not None else 'NOT_FOUND'
-                })
-
-                if val is None:
-                    cell.value = 'N/A'
-                    cell.fill  = FILL_RED
-                    cell.font  = Font(color='9C0006', italic=True, size=9)
-                    stats['not_found'] += 1
-                else:
-                    cell.value  = val
-                    cell.fill   = _tmpl_fill(conf, flag)
-                    cell.font   = _tmpl_font(conf, flag)
-                    cell.alignment = Alignment(horizontal='right')
-                    if isinstance(val, (int, float)):
-                        cell.number_format = '#,##0.00' if isinstance(val, float) else '#,##0'
-                    # Add comment with source info
-                    try:
-                        comment_text = (f'Metric: {mk}\n'
-                                        f'Year: {yr_handle}\n'
-                                        f'Page: {pg}\n'
-                                        f'Confidence: {conf:.2f}\n'
-                                        f'Flag: {flag}\n'
-                                        f'Provider: {PROVIDER}')
-                        cell.comment = Comment(comment_text, 'FinAgent')
-                    except Exception:
-                        pass
-
-                    if conf >= 0.85: stats['green'] += 1
-                    elif conf >= 0.60: stats['yellow'] += 1
-                    else: stats['low_conf'] += 1
-
-    # ── Extraction_Log sheet ──────────────────────────────────────────
-    if 'Extraction_Log' in wb_tmpl.sheetnames:
-        del wb_tmpl['Extraction_Log']
-    ls = wb_tmpl.create_sheet('Extraction_Log')
-    headers = ['Sheet', 'Field (Original)', 'Canonical Key', 'Year',
-               'Value', 'Confidence', 'Flag', 'Source Page', 'Status']
-    ls.append(headers)
-    for col, h in enumerate(headers, 1):
-        ls.cell(1, col).font = Font(bold=True)
-        ls.column_dimensions[__import__('openpyxl').utils.get_column_letter(col)].width = 18
-    for r in log_rows:
-        ls.append([r['sheet'], r['field'], r['canonical'], r['year'],
-                   r['value'], f"{r['confidence']:.2f}", r['flag'],
-                   str(r['page']), r['status']])
-
-    # ── Save ──────────────────────────────────────────────────────────
-    tmpl_stem = Path(EXCEL_PATH).stem
-    tmpl_out  = f'{OUT_DIR}{tmpl_stem}_filled.xlsx'
-    wb_tmpl.save(tmpl_out)
-
-    # ── Summary ───────────────────────────────────────────────────────
-    filled  = stats['green'] + stats['yellow'] + stats['low_conf']
-    total_c = filled + stats['not_found']
-    cov_pct = filled / total_c * 100 if total_c else 0
-
-    print(f'\n✅  Template filled → {tmpl_out}')
-    print(f'   Source template  : {EXCEL_PATH}')
-    print()
-    print('TEMPLATE FILL REPORT')
-    print('─' * 40)
-    print(f'  Total cells targeted : {total_c}')
-    print(f'  🟢 Filled (high conf): {stats["green"]}')
-    print(f'  🟡 Filled (med conf) : {stats["yellow"]}')
-    print(f'  🟠 Filled (low conf) : {stats["low_conf"]}')
-    print(f'  ❌ Not found (N/A)   : {stats["not_found"]}')
-    print(f'  Coverage             : {cov_pct:.1f}%')
-    print()
-    print('Extraction_Log sheet added — check it for per-field audit trail.')
-
-    # Show what wasn't filled
-    not_found = [r for r in log_rows if r['status'] == 'NOT_FOUND']
-    if not_found:
-        print(f'\nFields not filled ({len(not_found)}):')
-        shown = set()
-        for r in not_found:
-            key = f'{r["canonical"]} ({r["year"]})'
-            if key not in shown:
-                print(f'  ✗ {r["field"]!r} → normalized to {r["canonical"]!r} — not in facts')
-                shown.add(key)
-            if len(shown) >= 15:
-                print(f'  ... and {len(not_found) - len(shown)} more')
-                break
-
-"""## Cell 7 — Debug
-Run only if metrics are missing. Diagnoses exactly which layer failed.
-
-"""
-
-print('DIAGNOSIS')
-print('='*55)
-
-total_facts = sum(1 for v in facts.values() if isinstance(v, dict) and v.get('value') is not None)
-print(f'Total facts with values: {total_facts}')
-
-# Check what's missing
-all_metrics = list(BASE_CANONICAL.keys())
-years_found = sorted(set(v.get('year') for v in facts.values() if isinstance(v, dict) and v.get('year')))
-print(f'Years: {years_found}')
-print()
-
-print('Missing metrics (value is None or not found):')
-for metric in all_metrics:
-    for yr in years_found:
-        f = facts.get(f'{metric}__{yr}')
-        if f is None or f.get('value') is None:
-            print(f'  ✗ {metric} ({yr})')
-
-print()
-print('Page Index blocks found:')
-for fy, idx in page_indexes.items():
-    print(f'  {fy}: {list(idx.keys())}')
-
-print()
-print('Signal check — which pages have financial content:')
-tc_sample = list(all_tc.values())[0]['tc']
-signals = ['total assets', 'revenue from operations', 'cash flows from operating']
-for pg, text in sorted(tc_sample.items(), key=lambda x: int(x[0])):
-    hits = [s for s in signals if s in text.lower()]
-    if hits:
-        print(f'  Page {pg}: {hits}')
+
+if __name__ == '__main__':
+ t0 = time.time()
+
+ # ── Layer 1: Ingest ───────────────────────────────────────────────────
+ print('Layer 1: Ingesting PDFs (layout + tables)...')
+ all_tc = ingest_all(PDF_REGISTRY)
+
+ # ── Layer 2: Build Indexes ────────────────────────────────────────────
+ print('Layer 2: Building Page Index + BM25...')
+ page_indexes = {}
+ bm25_indexes = {}
+ for fy, tc_data in all_tc.items():
+     tc = tc_data['tc']; h = tc_data['hash']
+     page_indexes[fy] = build_page_index(h, tc, pdf_path=tc_data['path'])
+     bm25, bp = build_bm25(tc)
+     bm25_indexes[fy] = (bm25, bp)
+     print(f'  {fy}: {len(page_indexes[fy])} blocks in Page Index, BM25 over {len(tc)} pages')
+
+ # ── Schema Mapper (if Excel template exists) ──────────────────────────
+ primary_fy    = list(all_tc.keys())[0]
+ primary_tc    = all_tc[primary_fy]['tc']
+ primary_hash  = all_tc[primary_fy]['hash']
+ primary_idx   = page_indexes[primary_fy]
+ schema = {}
+ if Path(EXCEL_PATH).exists():
+     print('Schema Mapper: reading Excel template...')
+     schema = schema_mapper(EXCEL_PATH, primary_tc, primary_hash, idx=primary_idx)
+     print(f'  Field map: {len(schema.get("field_map", {}))} entries')
+
+ # ── Layer 3: LangGraph Dual-Agent Extraction ──────────────────────────
+ print('Layer 3: Running LangGraph dual-agent...')
+ graph = build_graph()
+ init_state = AgentState(
+     all_tc=all_tc, page_indexes=page_indexes, bm25_indexes=bm25_indexes,
+     schema=schema, profiles={},
+     facts={}, validation={}, failed_fields=[],
+     retry_count=0, top_k=3, log=[]
+ )
+ final_state = graph.invoke(init_state)
+ facts = final_state['facts']
+
+ # Count what was extracted before ratios
+ extracted_count = sum(1 for v in facts.values()
+                       if isinstance(v, dict) and v.get('value') is not None)
+ print(f'  Extracted: {extracted_count} raw metrics')
+
+ # ── Layer 4: Ratio Computation Engine (NEW) ───────────────────────────
+ print('Layer 4: Ratio computation is handled within the LangGraph pipeline.')
+
+ # ── Summary ───────────────────────────────────────────────────────────
+ total = sum(1 for v in facts.values() if isinstance(v, dict) and v.get('value') is not None)
+ derived = sum(1 for v in facts.values() if isinstance(v, dict) and v.get('flag') == 'DERIVED')
+ print(f'\n✓ Done in {time.time()-t0:.1f}s')
+ print(f'  Raw extracted : {extracted_count}')
+ print(f'  Derived ratios: {derived}')
+ print(f'  Total metrics : {total}')
+ print(f'  Validation    : {final_state["validation"]}')
+ print(f'  Retries       : {final_state["retry_count"]}')
+
+ # Print extracted values by year
+ from collections import defaultdict
+ by_yr = defaultdict(dict)
+ for key, f in facts.items():
+     if isinstance(f, dict) and f.get('value') is not None:
+         by_yr[f.get('year', '?')][f.get('metric', key.split('__')[0])] = f
+
+ for yr in sorted(by_yr, key=str):
+     print(f'\n  ── {yr} ({len(by_yr[yr])} metrics) ──')
+     for m, f in sorted(by_yr[yr].items()):
+         v = f['value']
+         c = f.get('confidence', 0)
+         flag = f.get('flag', '')
+         vstr = f'{v:,.2f}' if isinstance(v, float) else f'{v:,}' if isinstance(v, int) else str(v)
+         flag_icon = '🟢' if c >= 0.85 else ('🟡' if c >= 0.60 else ('📐' if flag == 'DERIVED' else '🔴'))
+         print(f'    {flag_icon} {m:<42} {vstr:>14}  conf={c:.2f}')
+
+ # Cell 5 — Write Raw Dump Excel
+
+ # ── Cell 5: Build and save raw dump Excel ────────────────────────────
+ # ── Determine years present in facts ─────────────────────────────────
+ years = sorted(set(
+     str(v.get('year')) for v in facts.values()
+     if isinstance(v, dict) and v.get('year') and v.get('year') != '?'
+ ))
+ if not years:
+     years = ['FY2024']
+ print(f'Years in facts: {years}')
+
+ # ── Build workbook ────────────────────────────────────────────────────
+ wb = Workbook()
+ first = True
+ tab_stats = {}   # {tab_name: {found, total}}
+
+ wb = Workbook()
+ first = True
+ tab_stats = {}   # {tab_name: {found, total}}
+
+ for tab_name, sections in TABS.items():
+     ws = wb.active if first else wb.create_sheet(tab_name)
+     if first: ws.title = tab_name; first = False
+
+     # ── Column widths ──
+     ws.column_dimensions['A'].width = 34   # metric label
+     ws.column_dimensions['B'].width = 8    # unit hint
+     for i in range(len(years)):
+         ws.column_dimensions[get_column_letter(i + 3)].width = 15
+     ws.column_dimensions[get_column_letter(len(years) + 3)].width = 12  # page(s)
+     ws.column_dimensions[get_column_letter(len(years) + 4)].width = 10  # conf
+     ws.column_dimensions[get_column_letter(len(years) + 5)].width = 10  # flag
+     if tab_name == 'Ratios & KPIs':
+         ws.column_dimensions[get_column_letter(len(years) + 6)].width = 38  # formula
+
+     # ── Header row ──
+     hdr(ws.cell(1, 1), 'Metric')
+     hdr(ws.cell(1, 2), 'Unit')
+     for i, yr in enumerate(years):
+         hdr(ws.cell(1, i + 3), yr)
+     hdr(ws.cell(1, len(years) + 3), 'Source Page(s)')
+     hdr(ws.cell(1, len(years) + 4), 'Conf')
+     hdr(ws.cell(1, len(years) + 5), 'Flag')
+     if tab_name == 'Ratios & KPIs':
+         hdr(ws.cell(1, len(years) + 6), 'Formula')
+     ws.row_dimensions[1].height = 22
+
+     row_idx = 2
+     tab_found = 0
+     tab_total = 0
+
+     for section_name, metric_keys in sections:
+         # Section subheader row
+         sec_cell = ws.cell(row_idx, 1, section_name.upper())
+         sec_cell.font = Font(bold=True, size=9, color='333333')
+         sec_cell.fill = PatternFill('solid', fgColor=LGREY)
+         sec_cell.alignment = Alignment(vertical='center')
+         for col in range(2, len(years) + 7):
+             ws.cell(row_idx, col).fill = PatternFill('solid', fgColor=LGREY)
+         ws.row_dimensions[row_idx].height = 16
+         row_idx += 1
+
+         for mk in metric_keys:
+             tab_total += 1
+             # Gather facts for this metric across all years
+             year_facts = {}
+             for yr in years:
+                 # Try exact key first, then fuzzy year match
+                 f = facts.get(f'{mk}__{yr}')
+                 if f is None:
+                     # Try digit match
+                     yr_digits = yr.replace('FY','').replace('Year','')
+                     for key, fct in facts.items():
+                         if (isinstance(fct, dict) and fct.get('metric') == mk
+                                 and yr_digits in str(fct.get('year',''))):
+                             f = fct; break
+                 if f is None:
+                     f = facts.get(f'{mk}__?')
+                 year_facts[yr] = f
+
+             # Determine row-level confidence/flag (worst across years)
+             all_confs = [f.get('confidence', 0) for f in year_facts.values() if f and f.get('value') is not None]
+             all_flags = [f.get('flag','') for f in year_facts.values() if f]
+             best_conf = max(all_confs) if all_confs else None
+             any_derived = any(fl == 'DERIVED' for fl in all_flags)
+             has_value = any(f and f.get('value') is not None for f in year_facts.values())
+
+             if has_value:
+                 tab_found += 1
+
+             # Label cell
+             label = mk.replace('_', ' ').title()
+             if mk.endswith('_pct'): label = label.replace(' Pct', ' %')
+             label_cell = ws.cell(row_idx, 1, label)
+             label_cell.font = Font(size=10)
+             label_cell.alignment = Alignment(vertical='center', indent=1)
+
+             # Unit cell (detect from any found fact)
+             unit_val = ''
+             for f in year_facts.values():
+                 if f and f.get('unit'):
+                     unit_val = str(f['unit']); break
+             ws.cell(row_idx, 2, unit_val).font = Font(size=9, color='666666', italic=True)
+
+             # Value cells
+             pages_all = set()
+             for i, yr in enumerate(years):
+                 f = year_facts.get(yr)
+                 val_cell = ws.cell(row_idx, i + 3)
+                 if f is None or f.get('value') is None:
+                     val_cell.value = '—'
+                     val_cell.font = Font(color='AAAAAA', size=10)
+                     val_cell.alignment = Alignment(horizontal='right')
+                 else:
+                     v = f['value']
+                     val_cell.value = round(v, 4) if isinstance(v, float) else v
+                     conf = f.get('confidence', 0)
+                     flag = f.get('flag', '')
+                     val_cell.fill = conf_fill(conf, flag)
+                     val_cell.font = conf_font(conf, flag)
+                     val_cell.alignment = Alignment(horizontal='right', vertical='center')
+                     if isinstance(v, (int, float)) and not mk.endswith('_pct') and not mk in ('current_ratio','quick_ratio','debt_to_equity','debt_to_ebitda','interest_coverage','asset_turnover','cfo_to_pat'):
+                         val_cell.number_format = '#,##0'
+                     elif mk.endswith('_pct'):
+                         val_cell.number_format = '0.00'
+                     # Collect source pages
+                     pg = f.get('exact_page') or f.get('page')
+                     if pg: pages_all.add(str(pg))
+
+             # Source pages
+             ws.cell(row_idx, len(years) + 3, ', '.join(sorted(pages_all)) or '—').font = Font(size=9, color='444444', italic=True)
+
+             # Confidence (show worst/best)
+             conf_display = f'{best_conf:.2f}' if best_conf is not None else '—'
+             ws.cell(row_idx, len(years) + 4, conf_display).font = Font(
+                 size=9,
+                 color='006100' if (best_conf or 0) >= 0.85 else
+                       '7F6000' if (best_conf or 0) >= 0.60 else
+                       '9C0006' if best_conf else '888888'
+             )
+
+             # Flag
+             flag_display = 'DERIVED' if any_derived else (all_flags[0] if all_flags else '—')
+             ws.cell(row_idx, len(years) + 5, flag_display).font = Font(size=9, italic=True, color='555555')
+
+             # Formula (Ratios tab only)
+             if tab_name == 'Ratios & KPIs':
+                 formula = ''
+                 for f in year_facts.values():
+                     if f and f.get('formula'): formula = f['formula']; break
+                 ws.cell(row_idx, len(years) + 6, formula).font = Font(size=9, italic=True, color='555555')
+
+             row_idx += 1
+
+     tab_stats[tab_name] = {'found': tab_found, 'total': tab_total}
+
+     # Freeze top row
+     ws.freeze_panes = 'C2'
+
+ # ── Tab 5: Summary ────────────────────────────────────────────────────
+ ws_sum = wb.create_sheet('Summary')
+ ws_sum.column_dimensions['A'].width = 35
+ ws_sum.column_dimensions['B'].width = 18
+ ws_sum.column_dimensions['C'].width = 18
+
+ hdr(ws_sum.cell(1, 1), 'Extraction Summary Report')
+ hdr(ws_sum.cell(1, 2), 'Found')
+ hdr(ws_sum.cell(1, 3), 'Coverage')
+
+ r = 2
+ ws_sum.cell(r, 1, 'PDF(s) processed').font = Font(bold=True, size=10)
+ ws_sum.cell(r, 2, str(len(PDF_REGISTRY))); r += 1
+ ws_sum.cell(r, 1, 'Years extracted').font = Font(bold=True, size=10)
+ ws_sum.cell(r, 2, ', '.join(years)); r += 1
+ ws_sum.cell(r, 1, 'Provider').font = Font(bold=True, size=10)
+ ws_sum.cell(r, 2, PROVIDER); r += 1
+ r += 1
+
+ # Per-tab stats
+ ws_sum.cell(r, 1, 'TAB COVERAGE').font = Font(bold=True, size=11)
+ r += 1
+ total_found = total_metrics = 0
+ for tab, stat in tab_stats.items():
+     pct = stat['found'] / stat['total'] * 100 if stat['total'] else 0
+     ws_sum.cell(r, 1, tab).font = Font(size=10)
+     ws_sum.cell(r, 2, f"{stat['found']} / {stat['total']}")
+     ws_sum.cell(r, 3, f'{pct:.0f}%').font = Font(
+         color='006100' if pct >= 80 else '7F6000' if pct >= 50 else '9C0006',
+         bold=True, size=10
+     )
+     total_found += stat['found']; total_metrics += stat['total']
+     r += 1
+
+ r += 1
+ ws_sum.cell(r, 1, 'TOTAL').font = Font(bold=True, size=11)
+ ws_sum.cell(r, 2, f'{total_found} / {total_metrics}').font = Font(bold=True)
+ overall_pct = total_found / total_metrics * 100 if total_metrics else 0
+ ws_sum.cell(r, 3, f'{overall_pct:.0f}%').font = Font(bold=True, size=11,
+     color='006100' if overall_pct >= 80 else '7F6000' if overall_pct >= 50 else '9C0006')
+ r += 2
+
+ # Confidence breakdown
+ ws_sum.cell(r, 1, 'CONFIDENCE BREAKDOWN').font = Font(bold=True, size=11)
+ r += 1
+ bands = [
+     ('🟢 High confidence (≥0.85)', lambda f: (f.get('confidence') or 0) >= 0.85 and f.get('flag') != 'DERIVED'),
+     ('🟡 Medium confidence (0.60-0.84)', lambda f: 0.60 <= (f.get('confidence') or 0) < 0.85),
+     ('🔴 Low confidence (<0.60)', lambda f: 0 < (f.get('confidence') or 0) < 0.60 and f.get('flag') != 'DERIVED'),
+     ('📐 Derived / Computed', lambda f: f.get('flag') == 'DERIVED'),
+     ('❌ Page corrected (cited≠actual)', lambda f: f.get('page_corrected')),
+ ]
+ for label, fn in bands:
+     count = sum(1 for v in facts.values() if isinstance(v, dict) and v.get('value') is not None and fn(v))
+     ws_sum.cell(r, 1, label).font = Font(size=10)
+     ws_sum.cell(r, 2, count); r += 1
+ r += 1
+
+ # Missing metrics list
+ ws_sum.cell(r, 1, 'MISSING METRICS (not found in any PDF)').font = Font(bold=True, size=11)
+ r += 1
+ all_target_metrics = [mk for sections in TABS.values() for _, mks in sections for mk in mks]
+ missing = []
+ for mk in all_target_metrics:
+     has_val = any(
+         isinstance(facts.get(f'{mk}__{yr}'), dict) and facts[f'{mk}__{yr}'].get('value') is not None
+         for yr in years
+     ) or (isinstance(facts.get(f'{mk}__?'), dict) and facts[f'{mk}__?'].get('value') is not None)
+     if not has_val:
+         missing.append(mk)
+
+ for mk in missing:
+     ws_sum.cell(r, 1, f'  • {mk.replace("_"," ").title()}').font = Font(size=10, color='9C0006')
+     r += 1
+
+ # Color legend
+ r += 1
+ ws_sum.cell(r, 1, 'COLOR LEGEND').font = Font(bold=True, size=11); r += 1
+ for color, meaning in [
+     (GREEN,   'High confidence — both agents agreed (≥0.85)'),
+     (YELLOW,  'Medium confidence — one agent or fuzzy match (0.60-0.84)'),
+     (RED,     'Low confidence or unverified (<0.60)'),
+     (DERIVED, 'Derived/Computed — calculated from other metrics'),
+ ]:
+     cell = ws_sum.cell(r, 1, '  ')
+     cell.fill = PatternFill('solid', fgColor=color)
+     ws_sum.cell(r, 2, meaning).font = Font(size=10)
+     r += 1
+
+ # ── Save ──────────────────────────────────────────────────────────────
+ out_name = f'Financial_Metrics_{"_".join(years)}.xlsx'
+ out_path = f'{OUT_DIR}{out_name}'
+ wb.save(out_path)
+
+ # ── Print summary ─────────────────────────────────────────────────────
+ print(f'\n✅ Excel saved → {out_path}')
+ print(f'   File: {out_name}')
+ print()
+ print('COVERAGE REPORT')
+ print('─' * 40)
+ for tab, stat in tab_stats.items():
+     pct = stat['found'] / stat['total'] * 100 if stat['total'] else 0
+     bar = '█' * int(pct / 10) + '░' * (10 - int(pct / 10))
+     print(f'  {tab:<22} {bar}  {stat["found"]:2}/{stat["total"]} ({pct:.0f}%)')
+ print(f'  {"TOTAL":<22} {total_found:2}/{total_metrics} ({overall_pct:.0f}%)')
+ print()
+
+ if missing:
+     print(f'MISSING ({len(missing)} metrics not extracted):')
+     for mk in missing:
+         print(f'  • {mk}')
+ else:
+     print('All target metrics extracted! 🎉')
+
+ print()
+ print('CONFIDENCE BREAKDOWN:')
+ g = sum(1 for v in facts.values() if isinstance(v,dict) and (v.get('confidence') or 0)>=0.85 and v.get('flag')!='DERIVED')
+ y = sum(1 for v in facts.values() if isinstance(v,dict) and 0.60<=(v.get('confidence') or 0)<0.85)
+ red_c = sum(1 for v in facts.values() if isinstance(v,dict) and 0<(v.get('confidence') or 0)<0.60 and v.get('flag')!='DERIVED')
+ d = sum(1 for v in facts.values() if isinstance(v,dict) and v.get('flag')=='DERIVED')
+ print(f'  🟢 High  : {g}')
+ print(f'  🟡 Medium: {y}')
+ print(f'  🔴 Low   : {red_c}')
+ print(f'  📐 Derived: {d}')
+
+ """## Cell 6 — Fill Existing Excel Template (Optional)
+
+ **Run only if you have a specific Excel template** (e.g. `Book2.xlsx`) that needs populating.
+ Cell 5 already wrote the full raw dump. This cell additionally fills your template.
+
+ **How it works:**
+ - Scans every row of every sheet in your template
+ - Finds the label cell (whichever column it's in — A, B, E, anywhere)
+ - Normalizes the label → looks up in `facts` dict
+ - Fills empty cells to the right of the label with matched values
+ - Color codes by confidence (🟢 green / 🟡 yellow / 🔴 red)
+ - Adds an `Extraction_Log` sheet with full audit trail
+
+ **Set `EXCEL_PATH` in Cell 1 before running.**
+
+ """
+
+ # ====================================================================
+ # CELL 6 — FILL EXISTING EXCEL TEMPLATE (OPTIONAL)
+ # Populates your own Excel template (Book2.xlsx or any other).
+ # Finds labels wherever they are — no hardcoded column assumptions.
+ # ====================================================================
+
+ from openpyxl import load_workbook
+ from openpyxl.styles import Font, PatternFill, Alignment
+ from openpyxl.comments import Comment
+ from collections import defaultdict
+ import re
+
+ # ── Check template exists ─────────────────────────────────────────────
+ if not Path(EXCEL_PATH).exists():
+     print(f'⚠️  Template not found: {EXCEL_PATH}')
+     print('   Set EXCEL_PATH in Cell 1 and re-run.')
+ else:
+     wb_tmpl = load_workbook(EXCEL_PATH)
+
+     # ── Styles ───────────────────────────────────────────────────────
+     FILL_GREEN  = PatternFill('solid', fgColor='E2EFDA')
+     FILL_YELLOW = PatternFill('solid', fgColor='FFEB9C')
+     FILL_RED    = PatternFill('solid', fgColor='FFC7CE')
+     FILL_DERIVED= PatternFill('solid', fgColor='D9EAD3')
+
+     def _tmpl_fill(conf, flag):
+         if flag == 'DERIVED': return FILL_DERIVED
+         if (conf or 0) >= 0.85: return FILL_GREEN
+         if (conf or 0) >= 0.60: return FILL_YELLOW
+         return FILL_RED
+
+     def _tmpl_font(conf, flag):
+         if flag == 'DERIVED': return Font(color='1E6B2E', italic=True)
+         if (conf or 0) >= 0.85: return Font(color='0D3B0D')
+         if (conf or 0) >= 0.60: return Font(color='7F6000', italic=True)
+         return Font(color='9C0006', italic=True)
+
+     # ── Find label cell in a row (any column) ────────────────────────
+     def _label_cell(ws, row):
+         """Scan all cells in row — return (cell, text) for first non-empty."""
+         for cell in row:
+             v = cell.value
+             # Handle merged cells
+             if v is None:
+                 for mr in ws.merged_cells.ranges:
+                     if cell.coordinate in mr:
+                         top = ws.cell(mr.min_row, mr.min_col)
+                         if top.value: v = top.value; break
+             if v and str(v).strip() and len(str(v).strip()) > 1:
+                 return cell, str(v).strip()
+         return None, ''
+
+     # ── Detect year from column header ───────────────────────────────
+     def _col_year(ws, col):
+         """Look up column headers (up to 5 rows above) for a year hint."""
+         for offset in range(1, 6):
+             row_idx = max(1, ws.min_row + offset - 1)
+             # Scan up to row 6 for header
+             pass
+         for r in range(1, min(ws.max_row, 6)):
+             cell_val = ws.cell(r, col).value
+             if not cell_val: continue
+             s = str(cell_val)
+             # FY2024, 2024, Year 1, Year1 etc.
+             for pat, fmt in [
+                 (r'FY\s*(\d{4})', lambda m: f'FY{m.group(1)}'),
+                 (r'(\d{4})-\d+',  lambda m: f'FY{m.group(1)}'),
+                 (r'Year\s*(\d)',   lambda m: f'Year{m.group(1)}'),
+                 (r'(20\d{2})', lambda m: f'FY{m.group(1)}'),
+             ]:
+                 m = re.search(pat, s, re.IGNORECASE)
+                 if m: return fmt(m)
+         return f'FY{years[0].replace("FY","") if years else "2024"}'
+
+     # ── Fact lookup with flexible year matching ───────────────────────
+     def _look_up(mk, yr_handle):
+         """Find fact for metric+year, trying multiple year formats."""
+         # 1. Exact
+         f = facts.get(f'{mk}__{yr_handle}')
+         if f and f.get('value') is not None: return f
+         # 2. Digit match: FY2024 ↔ 2024 ↔ Year1
+         yr_digits = re.sub(r'[^0-9]', '', str(yr_handle))
+         for key, fact in facts.items():
+             if not isinstance(fact, dict): continue
+             if fact.get('metric') != mk: continue
+             if fact.get('value') is None: continue
+             fact_digits = re.sub(r'[^0-9]', '', str(fact.get('year', '')))
+             if yr_digits and fact_digits and yr_digits in fact_digits:
+                 return fact
+         # 3. year=? fallback
+         f2 = facts.get(f'{mk}__?')
+         if f2 and f2.get('value') is not None: return f2
+         # 4. Any year for this metric (last resort, pick most recent)
+         cands = sorted(
+             [f for f in facts.values() if isinstance(f, dict)
+              and f.get('metric') == mk and f.get('value') is not None],
+             key=lambda x: str(x.get('year', '')), reverse=True
+         )
+         return cands[0] if cands else None
+
+     # ── Main fill loop ────────────────────────────────────────────────
+     log_rows = []
+     stats = defaultdict(int)
+
+     for sheet_name in wb_tmpl.sheetnames:
+         ws = wb_tmpl[sheet_name]
+         if sheet_name == 'Extraction_Log': continue  # skip log sheet
+
+         for row in ws.iter_rows():
+             lbl_cell, lbl_text = _label_cell(ws, row)
+             if not lbl_cell or not lbl_text: continue
+
+             mk = normalize(lbl_text)  # uses canonical map
+             if not mk: continue
+
+             # Find empty cells to the right of the label
+             target_cells = [c for c in row
+                             if c.column > lbl_cell.column
+                             and c.value is None]
+             if not target_cells: continue
+
+             for cell in target_cells:
+                 yr_handle = _col_year(ws, cell.column)
+                 fact = _look_up(mk, yr_handle)
+
+                 conf = fact.get('confidence', 0) if fact else 0
+                 val  = fact.get('value') if fact else None
+                 flag = fact.get('flag', '') if fact else ''
+                 pg   = (fact.get('exact_page') or fact.get('page') or '?') if fact else '?'
+
+                 log_rows.append({
+                     'sheet': sheet_name, 'field': lbl_text, 'canonical': mk,
+                     'year': yr_handle, 'value': val, 'confidence': conf,
+                     'flag': flag, 'page': pg,
+                     'status': 'FILLED' if val is not None else 'NOT_FOUND'
+                 })
+
+                 if val is None:
+                     cell.value = 'N/A'
+                     cell.fill  = FILL_RED
+                     cell.font  = Font(color='9C0006', italic=True, size=9)
+                     stats['not_found'] += 1
+                 else:
+                     cell.value  = val
+                     cell.fill   = _tmpl_fill(conf, flag)
+                     cell.font   = _tmpl_font(conf, flag)
+                     cell.alignment = Alignment(horizontal='right')
+                     if isinstance(val, (int, float)):
+                         cell.number_format = '#,##0.00' if isinstance(val, float) else '#,##0'
+                     # Add comment with source info
+                     try:
+                         comment_text = (f'Metric: {mk}\n'
+                                         f'Year: {yr_handle}\n'
+                                         f'Page: {pg}\n'
+                                         f'Confidence: {conf:.2f}\n'
+                                         f'Flag: {flag}\n'
+                                         f'Provider: {PROVIDER}')
+                         cell.comment = Comment(comment_text, 'FinAgent')
+                     except Exception:
+                         pass
+
+                     if conf >= 0.85: stats['green'] += 1
+                     elif conf >= 0.60: stats['yellow'] += 1
+                     else: stats['low_conf'] += 1
+
+     # ── Extraction_Log sheet ──────────────────────────────────────────
+     if 'Extraction_Log' in wb_tmpl.sheetnames:
+         del wb_tmpl['Extraction_Log']
+     ls = wb_tmpl.create_sheet('Extraction_Log')
+     headers = ['Sheet', 'Field (Original)', 'Canonical Key', 'Year',
+                'Value', 'Confidence', 'Flag', 'Source Page', 'Status']
+     ls.append(headers)
+     for col, h in enumerate(headers, 1):
+         ls.cell(1, col).font = Font(bold=True)
+         ls.column_dimensions[__import__('openpyxl').utils.get_column_letter(col)].width = 18
+     for r in log_rows:
+         ls.append([r['sheet'], r['field'], r['canonical'], r['year'],
+                    r['value'], f"{r['confidence']:.2f}", r['flag'],
+                    str(r['page']), r['status']])
+
+     # ── Save ──────────────────────────────────────────────────────────
+     tmpl_stem = Path(EXCEL_PATH).stem
+     tmpl_out  = f'{OUT_DIR}{tmpl_stem}_filled.xlsx'
+     wb_tmpl.save(tmpl_out)
+
+     # ── Summary ───────────────────────────────────────────────────────
+     filled  = stats['green'] + stats['yellow'] + stats['low_conf']
+     total_c = filled + stats['not_found']
+     cov_pct = filled / total_c * 100 if total_c else 0
+
+     print(f'\n✅  Template filled → {tmpl_out}')
+     print(f'   Source template  : {EXCEL_PATH}')
+     print()
+     print('TEMPLATE FILL REPORT')
+     print('─' * 40)
+     print(f'  Total cells targeted : {total_c}')
+     print(f'  🟢 Filled (high conf): {stats["green"]}')
+     print(f'  🟡 Filled (med conf) : {stats["yellow"]}')
+     print(f'  🟠 Filled (low conf) : {stats["low_conf"]}')
+     print(f'  ❌ Not found (N/A)   : {stats["not_found"]}')
+     print(f'  Coverage             : {cov_pct:.1f}%')
+     print()
+     print('Extraction_Log sheet added — check it for per-field audit trail.')
+
+     # Show what wasn't filled
+     not_found = [r for r in log_rows if r['status'] == 'NOT_FOUND']
+     if not_found:
+         print(f'\nFields not filled ({len(not_found)}):')
+         shown = set()
+         for r in not_found:
+             key = f'{r["canonical"]} ({r["year"]})'
+             if key not in shown:
+                 print(f'  ✗ {r["field"]!r} → normalized to {r["canonical"]!r} — not in facts')
+                 shown.add(key)
+             if len(shown) >= 15:
+                 print(f'  ... and {len(not_found) - len(shown)} more')
+                 break
+
+ """## Cell 7 — Debug
+ Run only if metrics are missing. Diagnoses exactly which layer failed.
+
+ """
+
+ print('DIAGNOSIS')
+ print('='*55)
+
+ total_facts = sum(1 for v in facts.values() if isinstance(v, dict) and v.get('value') is not None)
+ print(f'Total facts with values: {total_facts}')
+
+ # Check what's missing
+ all_metrics = list(BASE_CANONICAL.keys())
+ years_found = sorted(set(v.get('year') for v in facts.values() if isinstance(v, dict) and v.get('year')))
+ print(f'Years: {years_found}')
+ print()
+
+ print('Missing metrics (value is None or not found):')
+ for metric in all_metrics:
+     for yr in years_found:
+         f = facts.get(f'{metric}__{yr}')
+         if f is None or f.get('value') is None:
+             print(f'  ✗ {metric} ({yr})')
+
+ print()
+ print('Page Index blocks found:')
+ for fy, idx in page_indexes.items():
+     print(f'  {fy}: {list(idx.keys())}')
+
+ print()
+ print('Signal check — which pages have financial content:')
+ tc_sample = list(all_tc.values())[0]['tc']
+ signals = ['total assets', 'revenue from operations', 'cash flows from operating']
+ for pg, text in sorted(tc_sample.items(), key=lambda x: int(x[0])):
+     hits = [s for s in signals if s in text.lower()]
+     if hits:
+         print(f'  Page {pg}: {hits}')
