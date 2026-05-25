@@ -112,6 +112,7 @@ from rank_bm25 import BM25Okapi
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.comments import Comment
+from openpyxl.utils import get_column_letter
 from langgraph.graph import StateGraph, END
 
 # ====================================================================
@@ -1223,6 +1224,7 @@ from rank_bm25 import BM25Okapi
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.comments import Comment
+from openpyxl.utils import get_column_letter
 from langgraph.graph import StateGraph, END
 
 # ====================================================================
