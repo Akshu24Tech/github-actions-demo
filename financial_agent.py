@@ -392,7 +392,11 @@ def ingest_all(registry:dict) -> dict:
         else:
             print(f'  Extracting {fiscal_year} (layout + tables)...')
             tc={}
-            with pdfplumber.open(pdf_path, repair=True) as pdf:  # repair=True handles corrupted PDFs
+            try:
+                pdf_open = pdfplumber.open(pdf_path, repair=True)
+            except Exception:
+                pdf_open = pdfplumber.open(pdf_path)
+            with pdf_open as pdf:
                 n=len(pdf.pages)
                 for i,pg in enumerate(pdf.pages):
                     if i%50==0: print(f'    {i+1}/{n}')
@@ -1449,7 +1453,11 @@ def ingest_all(registry:dict) -> dict:
         else:
             print(f'  Extracting {fiscal_year} (layout + tables)...')
             tc={}
-            with pdfplumber.open(pdf_path, repair=True) as pdf:  # repair=True handles corrupted PDFs
+            try:
+                pdf_open = pdfplumber.open(pdf_path, repair=True)
+            except Exception:
+                pdf_open = pdfplumber.open(pdf_path)
+            with pdf_open as pdf:
                 n=len(pdf.pages)
                 for i,pg in enumerate(pdf.pages):
                     if i%50==0: print(f'    {i+1}/{n}')
